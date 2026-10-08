@@ -25,6 +25,8 @@ import Link from "next/link";
 import { useToast } from "@/hooks/use-toast";
 
 import { opportunityApi } from "@/lib/api";
+import { mapOpportunity } from "@/lib/opportunity";
+import type { OpportunityView } from "@/lib/opportunity";
 import { useAuth } from "@/contexts/auth-context";
 
 import {
@@ -39,20 +41,6 @@ import {
   History,
   CheckSquare,
 } from "lucide-react";
-
-interface OpportunityData {
-  id: string;
-  title: string;
-  value: number;
-  stage: string;
-  probability: number;
-  closeDate: string;
-  assignedTo: string;
-  description?: string;
-  createdAt: string;
-  updatedAt: string;
-  currency?: string;
-}
 
 const stageColors: Record<string, string> = {
   prospecting: "bg-blue-100 text-blue-800",
@@ -73,30 +61,12 @@ const formatCurrency = (value: number) => {
 
 const stages = ["prospecting", "qualification", "needs-analysis", "proposal", "negotiation", "closed-won"];
 
-function mapOpportunity(item: any): OpportunityData {
-  return {
-    id: item.id,
-    title: item.name || "Untitled Opportunity",
-    value: item.amount || 0,
-    stage: (item.stage || "prospecting").toLowerCase().replace(/_/g, "-"),
-    probability: item.probability ?? 0,
-    closeDate: item.expectedCloseDate || item.closeDate || item.createdAt,
-    assignedTo: item.owner
-      ? `${item.owner.firstName} ${item.owner.lastName}`.trim()
-      : "—",
-    description: item.description,
-    createdAt: item.createdAt,
-    updatedAt: item.updatedAt,
-    currency: "INR",
-  };
-}
-
 export default function OpportunityDetailPage() {
   const params = useParams();
   const router = useRouter();
   const { toast } = useToast();
   const { hasEffectivePermission } = useAuth();
-  const [opportunity, setOpportunity] = React.useState<OpportunityData | null>(null);
+  const [opportunity, setOpportunity] = React.useState<OpportunityView | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
 
   React.useEffect(() => {
@@ -274,6 +244,87 @@ export default function OpportunityDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {opportunity.greRegistration && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Latest GRE Registration</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm text-muted-foreground">Reference</p>
+                <p className="font-medium">{opportunity.greRegistration.referenceNumber || "GRE submission"}</p>
+              </div>
+              {opportunity.greRegistration.submittedAt && (
+                <div>
+                  <p className="text-sm text-muted-foreground">Submitted</p>
+                  <p className="text-sm">{formatDateTime(opportunity.greRegistration.submittedAt)}</p>
+                </div>
+              )}
+              {opportunity.lead && (
+                <Link className="text-sm text-primary hover:underline" href={`/leads/${opportunity.lead.id}`}>
+                  {opportunity.lead.leadNumber || "Open Lead"}
+                </Link>
+              )}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div>
+                <p className="text-sm text-muted-foreground">Customer</p>
+                <p className="font-medium">
+                  {[opportunity.greRegistration.lead.firstName, opportunity.greRegistration.lead.lastName]
+                    .filter(Boolean)
+                    .join(" ") || "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Phone</p>
+                <p className="font-medium">{opportunity.greRegistration.lead.phone || "—"}</p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Email</p>
+                <p className="font-medium">{opportunity.greRegistration.lead.email || "—"}</p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Company</p>
+                <p className="font-medium">
+                  {opportunity.greRegistration.company.name || opportunity.greRegistration.lead.company || "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Project</p>
+                <p className="font-medium">{opportunity.greRegistration.siteVisit.project || "—"}</p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Site Visit</p>
+                <p className="font-medium">
+                  {[opportunity.greRegistration.siteVisit.date, opportunity.greRegistration.siteVisit.time]
+                    .filter(Boolean)
+                    .join(" ") || (opportunity.greRegistration.siteVisit.scheduledAt
+                      ? formatDateTime(opportunity.greRegistration.siteVisit.scheduledAt)
+                      : "—")}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Visit Type</p>
+                <p className="font-medium">{opportunity.greRegistration.siteVisit.visitType || "—"}</p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Visitors</p>
+                <p className="font-medium">{opportunity.greRegistration.siteVisit.visitorCount ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Budget</p>
+                <p className="font-medium">
+                  {opportunity.greRegistration.lead.budget == null
+                    ? "—"
+                    : formatCurrency(opportunity.greRegistration.lead.budget)}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Tabs defaultValue="details" className="space-y-4">
         <TabsList>

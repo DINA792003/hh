@@ -1,0 +1,22 @@
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "secondaryPhone" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "tertiaryPhone" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "alternateEmail" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "leadSubSource" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "campaign" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "leadType" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "preferredLocation" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "occupation" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "dateOfBirth" TIMESTAMP(3);
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "gender" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "companyType" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "companyEmail" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "companyPhone" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "designation" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "department" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "gstNumber" TEXT;
+ALTER TABLE "Lead" ADD COLUMN IF NOT EXISTS "companyComments" TEXT;
+
+CREATE INDEX IF NOT EXISTS "Lead_tenantId_companyId_idx" ON "Lead"("tenantId", "companyId");
+CREATE INDEX IF NOT EXISTS "Lead_tenantId_mobile_idx" ON "Lead"("tenantId", "mobile");
+CREATE INDEX IF NOT EXISTS "Lead_tenantId_secondaryPhone_idx" ON "Lead"("tenantId", "secondaryPhone");
+CREATE INDEX IF NOT EXISTS "Lead_tenantId_tertiaryPhone_idx" ON "Lead"("tenantId", "tertiaryPhone");

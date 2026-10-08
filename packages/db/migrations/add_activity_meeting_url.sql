@@ -1,0 +1,1 @@
+ALTER TABLE "Activity" ADD COLUMN IF NOT EXISTS "meetingUrl" TEXT;

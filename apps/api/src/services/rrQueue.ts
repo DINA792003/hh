@@ -149,6 +149,31 @@ export function selectNextSequenceMember<T extends { sequenceId: number }>(membe
   return ordered.find((member) => member.sequenceId > previousId) || ordered[0] || null;
 }
 
+export function getReusableSiteVisitOwner(
+  existingLeadId: string | null,
+  previousVisit: { projectId: string | null; assigneeId: string | null } | null,
+  selectedProjectId: string,
+): string | null {
+  if (!isSiteVisitRevisit(existingLeadId, previousVisit, selectedProjectId)) return null;
+  return previousVisit?.assigneeId ?? null;
+}
+
+export function isSiteVisitRevisit(
+  existingLeadId: string | null,
+  previousVisit: { projectId: string | null } | null,
+  selectedProjectId: string,
+): boolean {
+  return Boolean(existingLeadId && previousVisit && previousVisit.projectId === selectedProjectId);
+}
+
+export function isNewProjectSiteVisit(
+  existingLeadId: string | null,
+  latestVisit: { projectId: string | null } | null,
+  selectedProjectId: string,
+): boolean {
+  return Boolean(existingLeadId && latestVisit && latestVisit.projectId !== selectedProjectId);
+}
+
 export class RoundRobinAssignmentService {
   static async getActiveMembers(queueId: string, tenantId: string, tx: RRClient = prisma) {
     return tx.rRQueueMember.findMany({
@@ -266,6 +291,84 @@ export class RoundRobinAssignmentService {
       return { queueId, leadId, assignedUserId, assignedUserName: userName, previousId: selected ? selected.sequenceId : queue.previousId, leadCount: updatedQueue.leadCount, skipped: nextState.skipped, assignmentReason };
   }
 
+  static async assignSiteVisitInTransaction(
+    tx: Prisma.TransactionClient,
+    queueId: string,
+    siteVisitId: string,
+    leadId: string,
+    tenantId: string,
+  ) {
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM "RRQueue" WHERE id = ${queueId} AND "tenantId" = ${tenantId} AND active = TRUE FOR UPDATE`);
+    const queue = await tx.rRQueue.findFirst({ where: { id: queueId, tenantId, active: true } });
+    if (!queue) throw new Error('RR_QUEUE_NOT_FOUND');
+
+    const siteVisit = await tx.siteVisit.findFirst({
+      where: { id: siteVisitId, leadId, tenantId },
+      select: { id: true, assigneeId: true },
+    });
+    if (!siteVisit) throw new Error('SITE_VISIT_NOT_FOUND');
+
+    const nextState = await this.getNextEligibleMember(queueId, tenantId, tx);
+    const selected = nextState.member;
+    if (!selected) throw new Error('NO_ELIGIBLE_USER');
+
+    const assignedUserId = selected.userId;
+    const userName = `${selected.user.firstName} ${selected.user.lastName}`.trim() || selected.user.email;
+    const updatedQueue = await tx.rRQueue.update({
+      where: { id: queueId },
+      data: { previousId: selected.sequenceId, leadCount: { increment: 1 } },
+    });
+    await tx.siteVisit.update({
+      where: { id: siteVisit.id },
+      data: { assigneeId: assignedUserId },
+    });
+    await tx.rRQueueHistory.createMany({
+      data: [
+        {
+          tenantId,
+          rrQueueId: queueId,
+          leadId,
+          field: 'Site Visit Owner',
+          userId: assignedUserId,
+          userName,
+          originalValue: siteVisit.assigneeId,
+          newValue: assignedUserId,
+        },
+        {
+          tenantId,
+          rrQueueId: queueId,
+          leadId,
+          field: 'Previous id',
+          userId: assignedUserId,
+          userName,
+          originalValue: String(queue.previousId),
+          newValue: String(selected.sequenceId),
+        },
+        ...(nextState.skipped.length ? [{
+          tenantId,
+          rrQueueId: queueId,
+          leadId,
+          field: 'Skip reasons',
+          userId: assignedUserId,
+          userName,
+          originalValue: JSON.stringify(nextState.skipped),
+          newValue: 'assigned',
+        }] : []),
+      ],
+    });
+
+    return {
+      queueId,
+      leadId,
+      siteVisitId,
+      assignedUserId,
+      assignedUserName: userName,
+      previousId: selected.sequenceId,
+      leadCount: updatedQueue.leadCount,
+      skipped: nextState.skipped,
+    };
+  }
+
   static async assignLeadsInBulk(tenantId: string, leads: Array<Record<string, any>>) {
     if (!leads.length) return { assignments: [], errors: [] };
     const queueIds = Array.from(new Set(leads.map((lead) => lead.rrQueueId).filter(Boolean)));
@@ -317,7 +420,7 @@ export async function findApplicableRRQueue(
   },
   tx: RRClient = prisma,
 ) {
-  const queues = await tx.rRQueue.findMany({ where: { tenantId }, orderBy: { createdAt: 'asc' } });
+  const queues = await tx.rRQueue.findMany({ where: { tenantId, active: true }, orderBy: { createdAt: 'asc' } });
   if (queues.length === 0) return null;
 
   let resolvedProjectName: string | null = criteria.projectName ?? null;

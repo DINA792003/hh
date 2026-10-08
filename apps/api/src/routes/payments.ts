@@ -104,6 +104,7 @@ router.get('/:id', authorize('Payment', 'read'), async (req: AuthRequest, res: R
             number: true,
             unit: { select: { number: true } },
             project: { select: { name: true } },
+            lead: { select: { firstName: true, lastName: true } },
           },
         },
       },
@@ -263,10 +264,11 @@ router.patch('/:id/verify', authorize('Payment', 'edit'), async (req: AuthReques
   }
 });
 
-router.patch('/:id/refund', authorize('Payment', 'edit'), async (req: AuthRequest, res: Response) => {
+router.patch(['/:id/refund', '/:id/reject'], authorize('Payment', 'edit'), async (req: AuthRequest, res: Response) => {
   try {
     const { tenantId, id: userId } = req.user!;
-    const { notes } = req.body;
+    const { notes, reason } = req.body;
+    const rejectReason = notes || reason;
 
     const existing = await prisma.payment.findFirst({
       where: { id: req.params.id, tenantId },
@@ -284,11 +286,11 @@ router.patch('/:id/refund', authorize('Payment', 'edit'), async (req: AuthReques
       where: { id: req.params.id },
       data: {
         status: 'REJECTED',
-        notes: notes || existing.notes,
+        notes: rejectReason || existing.notes,
       },
     });
 
-    await auditLog(tenantId, userId, 'UPDATE', 'Payment', payment.id, existing, { status: 'REJECTED', notes });
+    await auditLog(tenantId, userId, 'UPDATE', 'Payment', payment.id, existing, { status: 'REJECTED', notes: rejectReason });
 
     res.json({ success: true, data: payment });
   } catch (error) {

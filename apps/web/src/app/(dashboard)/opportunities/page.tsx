@@ -32,6 +32,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 
 import { opportunityApi } from "@/lib/api";
+import { mapOpportunity } from "@/lib/opportunity";
 
 import { useAuth } from "@/contexts/auth-context";
 
@@ -63,6 +64,25 @@ const listColumns: ColumnDef<Opportunity>[] = [
         {row.getValue("title")}
       </Link>
     ),
+  },
+  {
+    id: "greRegistration",
+    header: "GRE Registration",
+    cell: ({ row }) => {
+      const registration = row.original.greRegistration;
+      if (!registration) return "—";
+      const customerName = [registration.lead.firstName, registration.lead.lastName]
+        .filter(Boolean)
+        .join(" ");
+      return (
+        <div className="min-w-36">
+          <p className="font-medium">{registration.referenceNumber || "GRE submission"}</p>
+          <p className="text-xs text-muted-foreground">
+            {[customerName, registration.siteVisit.project].filter(Boolean).join(" · ") || "Registration details"}
+          </p>
+        </div>
+      );
+    },
   },
   {
     accessorKey: "value",
@@ -136,17 +156,7 @@ export default function OpportunitiesPage() {
         setIsLoading(true);
         const res = await opportunityApi.list({ page: currentPage, limit: 20 });
         if (res.data.success && res.data.data) {
-          const mapped = res.data.data.map((item: any) => ({
-            id: item.id,
-            title: item.name || "Untitled Opportunity",
-            value: item.amount || 0,
-            stage: (item.stage || "prospecting").toLowerCase().replace(/_/g, "-"),
-            probability: item.probability ?? 0,
-            closeDate: item.expectedCloseDate || item.closeDate || item.createdAt,
-            assignedTo: item.owner
-              ? `${item.owner.firstName} ${item.owner.lastName}`.trim()
-              : "—",
-          }));
+          const mapped = res.data.data.map(mapOpportunity);
           setOpportunities(mapped);
           setTotalItems(res.data.pagination?.total ?? mapped.length);
         } else {

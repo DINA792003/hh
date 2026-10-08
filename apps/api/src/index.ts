@@ -46,6 +46,7 @@ import { profilePermissionRoutes as profilePermissionRouter } from './routes/pro
 import { permissionSetGroupRoutes, userPermissionSetGroupRoutes } from './routes/permissionSetGroups';
 import { dataAdministrationRoutes as dataAdministrationRouter } from './routes/dataAdministration';
 import { companyRoutes as companyRouter } from './routes/companies';
+import { greRoutes as greRouter } from './routes/gre';
 import setupUsersRouter from './routes/setup/users';
 import setupCompanySettingsRouter from './routes/setup/company-settings';
 import setupPersonalSettingsRouter from './routes/setup/personal-settings';
@@ -132,6 +133,7 @@ export const createApp = () => {
   app.use('/api/data-administration', dataAdministrationRouter);
   app.use('/api/profile-security', profileSecurityRouter);
   app.use('/api/rrqueues', rrQueueRouter);
+  app.use('/api/gre', greRouter);
 
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     void req;

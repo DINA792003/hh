@@ -1,4 +1,5 @@
 ﻿import axios, { AxiosInstance, AxiosError } from 'axios';
+import type { OpportunityApiRecord } from './opportunity';
 
 const API_BASE_URL = '/api/proxy';
 
@@ -25,6 +26,17 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// Anonymous client for the public GRE registration links. Those endpoints answer
+// 401/410 for a missing or expired form session, which the form handles itself —
+// it must not be bounced to /login the way authenticated API calls are.
+const publicApi: AxiosInstance = axios.create({
+  baseURL: API_BASE_URL,
+  withCredentials: true,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
 export interface ApiResponse<T = any> {
   success: boolean;
@@ -109,13 +121,13 @@ export const siteVisitApi = {
 // Opportunity API
 export const opportunityApi = {
   list: (params?: Record<string, any>) =>
-    api.get<ApiResponse>('/api/opportunities', { params }),
+    api.get<ApiResponse<OpportunityApiRecord[]>>('/api/opportunities', { params }),
   get: (id: string) =>
-    api.get<ApiResponse>(`/api/opportunities/${id}`),
+    api.get<ApiResponse<OpportunityApiRecord>>(`/api/opportunities/${id}`),
   create: (data: any) =>
-    api.post<ApiResponse>('/api/opportunities', data),
+    api.post<ApiResponse<OpportunityApiRecord>>('/api/opportunities', data),
   update: (id: string, data: any) =>
-    api.put<ApiResponse>(`/api/opportunities/${id}`, data),
+    api.put<ApiResponse<OpportunityApiRecord>>(`/api/opportunities/${id}`, data),
   delete: (id: string) =>
     api.delete<ApiResponse>(`/api/opportunities/${id}`),
   updateStage: (id: string, stage: string) =>
@@ -175,9 +187,9 @@ export const paymentApi = {
   delete: (id: string) =>
     api.delete<ApiResponse>(`/api/payments/${id}`),
   verify: (id: string) =>
-    api.put<ApiResponse>(`/api/payments/${id}/verify`),
+    api.patch<ApiResponse>(`/api/payments/${id}/verify`),
   reject: (id: string, reason?: string) =>
-    api.put<ApiResponse>(`/api/payments/${id}/reject`, { reason }),
+    api.patch<ApiResponse>(`/api/payments/${id}/reject`, { reason }),
 };
 
 // Project API
@@ -219,7 +231,7 @@ export const unitApi = {
   delete: (id: string) =>
     api.delete<ApiResponse>(`/api/units/${id}`),
   updateStatus: (id: string, status: string) =>
-    api.put<ApiResponse>(`/api/units/${id}/status`, { status }),
+    api.patch<ApiResponse>(`/api/units/${id}/status`, { status }),
 };
 
 // Task API
@@ -262,6 +274,10 @@ export const followUpApi = {
 export const activityApi = {
   list: (params?: Record<string, any>) =>
     api.get<ApiResponse>('/api/activities', { params }),
+  summary: (params?: Record<string, any>) =>
+    api.get<ApiResponse>('/api/activities/summary', { params }),
+  options: () =>
+    api.get<ApiResponse>('/api/activities/options'),
   get: (id: string) =>
     api.get<ApiResponse>(`/api/activities/${id}`),
   create: (data: any) =>
@@ -330,8 +346,8 @@ export const dashboardApi = {
     api.put<ApiResponse>(`/api/dashboards/${id}`, data),
   delete: (id: string) =>
     api.delete<ApiResponse>(`/api/dashboards/${id}`),
-  getWidgetData: (id: string, widgetId: string) =>
-    api.get<ApiResponse>(`/api/dashboards/${id}/widgets/${widgetId}/data`),
+  getWidgetData: (id: string, widgetId: string, filters?: any) =>
+    api.post<ApiResponse>(`/api/dashboards/${id}/widgets/${widgetId}/data`, { filters }),
 };
 
 // Search API
@@ -747,4 +763,28 @@ export const rrQueueApi = {
   removeMember: (id: string, memberId: string) => api.delete<ApiResponse>(`/api/rrqueues/${id}/members/${memberId}`),
   history: (id: string, params?: Record<string, number>) => api.get<ApiResponse>(`/api/rrqueues/${id}/history`, { params }),
   assign: (id: string, leadId: string) => api.post<ApiResponse>(`/api/rrqueues/${id}/assign`, { leadId }),
+};
+
+// GRE (General Registration Enquiry) API
+const greSessionHeaders = (sessionToken: string) => ({ 'x-gre-session': sessionToken });
+
+export const greApi = {
+  // Setup (admin)
+  listForms: () => api.get<ApiResponse>('/api/gre/forms'),
+  createForm: (data: { name: string; defaultProjectId?: string | null; expiresAt?: string | null }) =>
+    api.post<ApiResponse>('/api/gre/forms', data),
+  updateForm: (id: string, data: { name?: string; isActive?: boolean; defaultProjectId?: string | null; expiresAt?: string | null }) =>
+    api.patch<ApiResponse>(`/api/gre/forms/${id}`, data),
+  listSubmissions: (params?: Record<string, any>) =>
+    api.get<ApiResponse>('/api/gre/submissions', { params }),
+
+  // Public registration form
+  getPublicForm: (token: string) =>
+    publicApi.get<ApiResponse>(`/api/gre/public/${token}`),
+  startPublicSession: (token: string, data: { countryCode: string; phone: string; alternatePhone?: string }) =>
+    publicApi.post<ApiResponse>(`/api/gre/public/${token}/sessions`, data),
+  getPublicSession: (token: string, sessionToken: string) =>
+    publicApi.get<ApiResponse>(`/api/gre/public/${token}/session`, { headers: greSessionHeaders(sessionToken) }),
+  submitPublicSession: (token: string, sessionToken: string, draft: any) =>
+    publicApi.post<ApiResponse>(`/api/gre/public/${token}/submit`, { draft }, { headers: greSessionHeaders(sessionToken) }),
 };

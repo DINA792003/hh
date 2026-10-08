@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { format } from "date-fns";
 import { GripVertical, MoreHorizontal, Eye, Edit, Trash2 } from "lucide-react";
+import type { OpportunityView } from "@/lib/opportunity";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,16 +17,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-export interface Opportunity {
-  id: string;
-  title: string;
-  value: number;
-  stage: string;
-  probability: number;
-  closeDate: string;
-  assignedTo: string;
-  currency?: string;
-}
+export type Opportunity = OpportunityView;
 
 interface OpportunityPipelineProps {
   opportunities: Opportunity[];
@@ -147,12 +139,22 @@ export function OpportunityPipeline({
                     )}
                   >
                     <div className="flex items-start justify-between mb-2">
-                      <Link
-                        href={`/opportunities/${opportunity.id}`}
-                        className="font-medium hover:underline line-clamp-1"
-                      >
-                        {opportunity.title}
-                      </Link>
+                      <div className="min-w-0">
+                        <Link
+                          href={`/opportunities/${opportunity.id}`}
+                          className="font-medium hover:underline line-clamp-1"
+                        >
+                          {opportunity.title}
+                        </Link>
+                        {opportunity.greRegistration && (
+                          <p className="mt-1 truncate text-xs text-muted-foreground">
+                            GRE {opportunity.greRegistration.referenceNumber || "submission"}
+                            {opportunity.greRegistration.siteVisit.project
+                              ? ` · ${opportunity.greRegistration.siteVisit.project}`
+                              : ""}
+                          </p>
+                        )}
+                      </div>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" className="h-6 w-6">

@@ -56,6 +56,9 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "
   completed: "success",
   failed: "destructive",
   refunded: "info",
+  verified: "success",
+  rejected: "destructive",
+  partial: "warning",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -63,6 +66,9 @@ const STATUS_LABEL: Record<string, string> = {
   completed: "Completed",
   failed: "Failed",
   refunded: "Refunded",
+  verified: "Verified",
+  rejected: "Rejected",
+  partial: "Partial",
 };
 
 const METHOD_LABEL: Record<string, string> = {
@@ -94,7 +100,22 @@ export default function PaymentDetailPage() {
         setIsLoading(true);
         const res = await paymentApi.get(params.id as string);
         if (res.data.success && res.data.data) {
-          setPayment(res.data.data);
+          const item = res.data.data;
+          setPayment({
+            id: item.id,
+            paymentNumber: item.reference || item.id.slice(-8).toUpperCase(),
+            leadName: item.booking?.lead
+              ? `${item.booking.lead.firstName} ${item.booking.lead.lastName}`.trim()
+              : "—",
+            bookingNumber: item.booking?.number || "—",
+            amount: item.amount || 0,
+            method: (item.method || "online").toLowerCase(),
+            status: (item.status || "pending").toLowerCase(),
+            paymentDate: item.paymentDate || item.createdAt,
+            reference: item.reference,
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt,
+          });
         } else {
           toast({ title: "Error", description: "Payment not found", variant: "destructive" as any });
           router.push("/payments");
@@ -125,7 +146,7 @@ export default function PaymentDetailPage() {
       const res = await paymentApi.reject(params.id as string, "Rejected by admin");
       if (res.data.success) {
         toast({ title: "Success", description: "Payment rejected" });
-        setPayment((prev) => (prev ? { ...prev, status: "failed" } : prev));
+        setPayment((prev) => (prev ? { ...prev, status: "rejected" } : prev));
       }
     } catch {
       toast({ title: "Error", description: "Failed to reject payment", variant: "destructive" as any });

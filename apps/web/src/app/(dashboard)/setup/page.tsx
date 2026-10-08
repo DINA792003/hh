@@ -56,11 +56,20 @@ const groups = [
       { label: "Recycle Bin", href: "/setup/data/recycle-bin", icon: ClipboardList },
     ],
   },
+  {
+    title: "GRE",
+    description: "Create public Guest Registration Enquiry links and review submissions.",
+    items: [
+      { label: "GRE Forms", href: "/setup/developer/gre", icon: FileKey2 },
+    ],
+  },
 ];
 
 export default function SetupPage() {
   const router = useRouter();
-  const { isLoading, isAuthenticated, isAdmin, isSuperAdmin } = useAuth();
+  const { isLoading, isAuthenticated, isAdmin, isSuperAdmin, hasFullAccess, hasEffectivePermission } = useAuth();
+  const canManageObjects =
+    isSuperAdmin || (isAdmin && (hasFullAccess || hasEffectivePermission("PROFILE_PERMISSION_MANAGE")));
 
   React.useEffect(() => {
     if (!isLoading && (!isAuthenticated || !isAdmin)) {
@@ -86,7 +95,7 @@ export default function SetupPage() {
       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
         {groups.map((group) => {
           const visibleItems = group.items.filter(
-            (item) => item.href !== "/admin/object-manager" || isSuperAdmin,
+            (item) => item.href !== "/admin/object-manager" || canManageObjects,
           );
           if (visibleItems.length === 0) return null;
           return (

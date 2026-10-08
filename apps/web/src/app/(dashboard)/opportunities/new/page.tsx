@@ -54,7 +54,9 @@ export default function NewOpportunityPage() {
         probability: probability ? Number(probability) : undefined,
         description: description.trim() || undefined,
       });
-      if (!response.data.success) throw new Error(response.data.error || "Failed to create opportunity");
+      if (!response.data.success || !response.data.data) {
+        throw new Error(response.data.error || "Failed to create opportunity");
+      }
       toast({ title: "Success", description: "Opportunity created successfully" });
       router.push(`/opportunities/${response.data.data.id}`);
     } catch (error: any) {

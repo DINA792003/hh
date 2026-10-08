@@ -16,6 +16,7 @@ import {
   TrendingUp,
   FileText,
   CalendarCheck,
+  CalendarDays,
   CreditCard,
   FolderKanban,
   CheckSquare,
@@ -75,6 +76,9 @@ export function getNavigationByProfile(
   }
   if (hasEffectivePermission("TASK_READ")) {
     nav.push({ title: "Tasks", href: "/tasks", icon: CheckSquare });
+  }
+  if (hasEffectivePermission("ACTIVITY_READ")) {
+    nav.push({ title: "Calendar", href: "/calendar", icon: CalendarDays });
   }
   // Dashboards nav: admin-only per sidebar spec ("Presales/SVC must see ONLY
   // Home, Leads, Site Visits"). DASHBOARD_READ alone is NOT sufficient — every

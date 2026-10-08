@@ -74,6 +74,7 @@ model Tenant {
   automations           Automation[]
   notifications         Notification[]
   leads                 Lead[]
+  companies             Company[]
   siteVisits            SiteVisit[]
   opportunities         Opportunity[]
   quotations            Quotation[]
@@ -98,6 +99,8 @@ model Tenant {
   rrQueues              RRQueue[]              @relation("RRQueueTenant")
   rrQueueMembers        RRQueueMember[]        @relation("RRQueueMemberTenant")
   rrQueueHistory        RRQueueHistory[]       @relation("RRQueueHistoryTenant")
+  greForms              GreForm[]
+  greSessions           GreSession[]
 
   @@index([slug])
   @@index([companyCode])
@@ -144,6 +147,7 @@ model User {
   tasks                    Task[]
   followUps                FollowUp[]
   activities               Activity[]
+  assignedActivities       Activity[]                 @relation("ActivityAssignee")
   aiConversations          AIConversation[]
   notifications            Notification[]
   auditLogs                AuditLog[]
@@ -658,10 +662,15 @@ model Lead {
   email      String?
   phone      String?
   mobile     String?
-  website    String?
+  secondaryPhone String?
+  tertiaryPhone String?
+  alternateEmail String?
+  website      String?
 
   // Standard Lead Fields - Company Information
   company           String
+  companyId         String?
+  companyAccount    Company?   @relation(fields: [companyId], references: [id], onDelete: SetNull)
   industry          Industry?
   annualRevenue     Float?
   numberOfEmployees Int?
@@ -675,6 +684,21 @@ model Lead {
   budget       Float?
   requirements String?
   notes        String?
+  leadSubSource String?
+  campaign      String?
+  leadType      String?
+  preferredLocation String?
+  occupation    String?
+  dateOfBirth   DateTime?
+  gender        String?
+
+  companyType       String?
+  companyEmail      String?
+  companyPhone      String?
+  designation       String?
+  department        String?
+  gstNumber         String?
+  companyComments   String?
 
   // Standard Lead Fields - Address
   street        String?
@@ -698,6 +722,7 @@ model Lead {
   tasks         Task[]
   followUps     FollowUp[]
   activities    Activity[]
+  greSessions   GreSession[]
   auditLogs     AuditLog[]
   ownerHistory  LeadOwnerHistory[]
   rrAssignmentHistory RRQueueHistory[]
@@ -709,8 +734,47 @@ model Lead {
   @@index([tenantId, ownerId])
   @@index([tenantId, email])
   @@index([tenantId, company])
+  @@index([tenantId, companyId])
+  @@index([tenantId, mobile])
+  @@index([tenantId, secondaryPhone])
+  @@index([tenantId, tertiaryPhone])
   @@index([tenantId, source])
   @@index([tenantId, createdAt])
+}
+
+model Company {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  normalizedName  String
+  companyType     String?
+  industry        Industry?
+  email           String?
+  phone           String?
+  website         String?
+  address         String?
+  city            String?
+  state           String?
+  country         String?
+  postalCode      String?
+  designation     String?
+  department      String?
+  numberOfEmployees Int?
+  gstNumber       String?
+  normalizedGst   String?
+  comments        String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  leads      Lead[]
+  greSessions GreSession[]
+
+  @@unique([tenantId, normalizedName])
+  @@unique([tenantId, normalizedGst])
+  @@index([tenantId, name])
+  @@index([tenantId, phone])
+  @@index([tenantId, email])
 }
 
 // ============================================
@@ -758,10 +822,14 @@ model SiteVisit {
   cancelledBy        User?           @relation("SvCancelledBy", fields: [cancelledById], references: [id])
   rating             Int?
   notes              String?
+  visitorCount       Int?
+  visitType          String?
+  transportRequired  Boolean?
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
 
   activities    Activity[]
+  greSessions   GreSession[]
   tasks         Task[]
   opportunities Opportunity[]
 
@@ -1142,6 +1210,21 @@ enum ActivityType {
   TASK
   FOLLOW_UP
   SYSTEM
+  SCHEDULE
+  MEMO
+}
+
+enum ActivityStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ActivityPriority {
+  LOW
+  MEDIUM
+  HIGH
 }
 
 model Activity {
@@ -1158,21 +1241,91 @@ model Activity {
   booking       Booking?     @relation(fields: [bookingId], references: [id])
   userId        String
   user          User         @relation(fields: [userId], references: [id])
+  assignedToId  String?
+  assignedTo    User?        @relation("ActivityAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
 
   type        ActivityType
   subject     String
   description String?
   dueDate     DateTime?
   completedAt DateTime?
+  startAt     DateTime?
+  endAt       DateTime?
+  status      ActivityStatus   @default(PLANNED)
+  priority    ActivityPriority @default(MEDIUM)
+  location    String?
+  meetingUrl  String?
+  reminderAt  DateTime?
+  notes       String?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
   @@index([tenantId])
   @@index([tenantId, userId])
+  @@index([tenantId, startAt])
+  @@index([tenantId, assignedToId])
   @@index([leadId])
   @@index([siteVisitId])
   @@index([opportunityId])
   @@index([bookingId])
+}
+
+enum GreSessionStatus {
+  STARTED
+  IN_PROGRESS
+  COMPLETED
+  EXPIRED
+  CANCELLED
+}
+
+model GreForm {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  publicToken     String   @unique
+  isActive        Boolean  @default(true)
+  expiresAt       DateTime?
+  defaultProjectId String?
+  createdById     String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  sessions GreSession[]
+
+  @@index([tenantId, isActive])
+  @@index([tenantId, createdAt])
+}
+
+model GreSession {
+  id                    String           @id @default(cuid())
+  tenantId              String
+  tenant                Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  formId                String
+  form                  GreForm          @relation(fields: [formId], references: [id], onDelete: Cascade)
+  sessionTokenHash      String           @unique
+  phoneCountryCode      String?
+  phone                 String?
+  normalizedPhone       String?
+  leadId                String?
+  lead                  Lead?            @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  siteVisitId           String?
+  siteVisit             SiteVisit?       @relation(fields: [siteVisitId], references: [id], onDelete: SetNull)
+  companyId             String?
+  company               Company?         @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  currentStep           Int              @default(1)
+  status                GreSessionStatus @default(STARTED)
+  draft                 Json?
+  referenceNumber       String?          @unique
+  leadWasExisting       Boolean?
+  expiresAt             DateTime
+  completedAt           DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  @@index([tenantId, normalizedPhone])
+  @@index([formId, status, createdAt])
+  @@index([leadId])
 }
 
 model Notification {

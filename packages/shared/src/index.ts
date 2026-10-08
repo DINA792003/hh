@@ -230,14 +230,27 @@ export const followUpSchema = z.object({
 });
 
 export const activitySchema = z.object({
-  type: z.enum(['CALL', 'MEETING', 'WHATSAPP', 'EMAIL', 'SITE_VISIT', 'NOTE', 'TASK', 'FOLLOW_UP', 'SYSTEM']),
-  subject: z.string().min(1, 'Subject is required'),
-  description: z.string().optional(),
+  type: z.enum(['CALL', 'MEETING', 'WHATSAPP', 'EMAIL', 'SITE_VISIT', 'NOTE', 'TASK', 'FOLLOW_UP', 'SYSTEM', 'SCHEDULE', 'MEMO']),
+  subject: z.string().trim().min(1, 'Subject is required').max(200),
+  description: z.string().trim().max(5000).optional(),
   dueDate: z.string().optional(),
-  leadId: z.string().optional(),
-  siteVisitId: z.string().optional(),
-  opportunityId: z.string().optional(),
-  bookingId: z.string().optional(),
+  leadId: z.string().min(1).nullable().optional(),
+  customerId: z.string().min(1).nullable().optional(),
+  siteVisitId: z.string().min(1).nullable().optional(),
+  opportunityId: z.string().min(1).nullable().optional(),
+  bookingId: z.string().min(1).nullable().optional(),
+  startAt: z.string().datetime({ offset: true }).nullable().optional(),
+  endAt: z.string().datetime({ offset: true }).nullable().optional(),
+  status: z.enum(['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']).optional(),
+  priority: z.enum(['LOW', 'MEDIUM', 'HIGH']).optional(),
+  assignedToId: z.string().min(1).nullable().optional(),
+  location: z.string().trim().max(300).nullable().optional(),
+  meetingUrl: z.string().trim().max(2048).url('Meeting link must be a valid URL').refine(
+    (value) => /^https?:\/\//i.test(value),
+    'Meeting link must use http or https',
+  ).nullable().optional(),
+  reminderAt: z.string().datetime({ offset: true }).nullable().optional(),
+  notes: z.string().trim().max(5000).nullable().optional(),
 });
 
 // ============================================

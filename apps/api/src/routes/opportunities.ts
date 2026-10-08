@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@dct-crm/db';
 import { z } from 'zod';
 import { authenticate, AuthRequest } from '../middleware/auth';
@@ -25,6 +26,119 @@ const opportunitySchema = z.object({
 });
 
 const updateOpportunitySchema = opportunitySchema.partial();
+
+const opportunityInclude = {
+  lead: {
+    select: {
+      id: true,
+      leadNumber: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      phone: true,
+      mobile: true,
+      company: true,
+      budget: true,
+      preferredLocation: true,
+      project: { select: { id: true, name: true } },
+      greSessions: {
+        where: { status: 'COMPLETED' },
+        orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        take: 1,
+        select: {
+          referenceNumber: true,
+          completedAt: true,
+          phone: true,
+          draft: true,
+          siteVisit: {
+            select: {
+              scheduledAt: true,
+              project: { select: { name: true } },
+            },
+          },
+        },
+      },
+    },
+  },
+  owner: { select: { id: true, firstName: true, lastName: true } },
+  creator: { select: { id: true, firstName: true, lastName: true } },
+  project: { select: { id: true, name: true } },
+} satisfies Prisma.OpportunityInclude;
+
+const opportunityDetailInclude = {
+  ...opportunityInclude,
+  owner: { select: { id: true, firstName: true, lastName: true, email: true } },
+  quotations: { select: { id: true, number: true, totalAmount: true, status: true } },
+  bookings: { select: { id: true, number: true, status: true, totalAmount: true } },
+  activities: { take: 10, orderBy: { createdAt: 'desc' } },
+  tasks: { take: 10, orderBy: { createdAt: 'desc' } },
+} satisfies Prisma.OpportunityInclude;
+
+type OpportunityWithGre = Prisma.OpportunityGetPayload<{ include: typeof opportunityInclude }>;
+
+function jsonProperty(value: Prisma.JsonValue | null, key: string): Prisma.JsonValue | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value[key] ?? null;
+}
+
+function jsonText(value: Prisma.JsonValue | null): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function jsonNumber(value: Prisma.JsonValue | null): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function mapOpportunity<T extends OpportunityWithGre>(opportunity: T) {
+  const lead = opportunity.lead;
+  const session = lead?.greSessions[0];
+  const greLead = session ? jsonProperty(session.draft, 'lead') : null;
+  const greSiteVisit = session ? jsonProperty(session.draft, 'siteVisit') : null;
+  const greCompany = session ? jsonProperty(session.draft, 'company') : null;
+
+  return {
+    ...opportunity,
+    lead: lead ? {
+      id: lead.id,
+      leadNumber: lead.leadNumber,
+      firstName: lead.firstName,
+      lastName: lead.lastName,
+      email: lead.email,
+      phone: lead.phone,
+      mobile: lead.mobile,
+      company: lead.company,
+      budget: lead.budget,
+      preferredLocation: lead.preferredLocation,
+      project: lead.project,
+    } : null,
+    greRegistration: session ? {
+      referenceNumber: session.referenceNumber,
+      submittedAt: session.completedAt,
+      lead: {
+        firstName: jsonText(jsonProperty(greLead, 'firstName')) ?? lead?.firstName ?? null,
+        lastName: jsonText(jsonProperty(greLead, 'lastName')) ?? lead?.lastName ?? null,
+        email: jsonText(jsonProperty(greLead, 'email')) ?? lead?.email ?? null,
+        phone: session.phone ?? lead?.phone ?? lead?.mobile ?? null,
+        company: jsonText(jsonProperty(greCompany, 'name')) ?? lead?.company ?? null,
+        budget: jsonNumber(jsonProperty(greLead, 'budget')) ?? lead?.budget ?? null,
+        preferredLocation: jsonText(jsonProperty(greLead, 'preferredLocation')) ?? lead?.preferredLocation ?? null,
+      },
+      siteVisit: {
+        date: jsonText(jsonProperty(greSiteVisit, 'date')),
+        time: jsonText(jsonProperty(greSiteVisit, 'time')),
+        project: session.siteVisit?.project?.name ?? lead?.project?.name ?? null,
+        scheduledAt: session.siteVisit?.scheduledAt ?? null,
+        visitType: jsonText(jsonProperty(greSiteVisit, 'visitType')),
+        visitorCount: jsonNumber(jsonProperty(greSiteVisit, 'visitorCount')),
+      },
+      company: {
+        name: jsonText(jsonProperty(greCompany, 'name')),
+        type: jsonText(jsonProperty(greCompany, 'type')),
+        industry: jsonText(jsonProperty(greCompany, 'industry')),
+      },
+    } : null,
+  };
+}
 
 router.get('/', authorize('Opportunity', 'read'), async (req: AuthRequest, res: Response) => {
   try {
@@ -66,10 +180,7 @@ router.get('/', authorize('Opportunity', 'read'), async (req: AuthRequest, res: 
         take: Number(limit),
         orderBy: { [sortBy as string]: sortOrder },
         include: {
-          lead: { select: { id: true, firstName: true, lastName: true } },
-          owner: { select: { id: true, firstName: true, lastName: true } },
-          creator: { select: { id: true, firstName: true, lastName: true } },
-          project: { select: { id: true, name: true } },
+          ...opportunityInclude,
           _count: { select: { quotations: true, bookings: true, activities: true } },
         },
       }),
@@ -78,7 +189,7 @@ router.get('/', authorize('Opportunity', 'read'), async (req: AuthRequest, res: 
 
     res.json({
       success: true,
-      data: opportunities,
+      data: opportunities.map(mapOpportunity),
       pagination: {
         page: Number(page),
         limit: Number(limit),
@@ -98,23 +209,14 @@ router.get('/:id', authorize('Opportunity', 'read'), async (req: AuthRequest, re
 
     const opportunity = await prisma.opportunity.findFirst({
       where: { ...(await getOpportunityVisibilityFilter(tenantId, req.user!.id, 'read')), id: req.params.id },
-      include: {
-        lead: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
-        owner: { select: { id: true, firstName: true, lastName: true, email: true } },
-        creator: { select: { id: true, firstName: true, lastName: true } },
-        project: { select: { id: true, name: true } },
-        quotations: { select: { id: true, number: true, totalAmount: true, status: true } },
-        bookings: { select: { id: true, number: true, status: true, totalAmount: true } },
-        activities: { take: 10, orderBy: { createdAt: 'desc' } },
-        tasks: { take: 10, orderBy: { createdAt: 'desc' } },
-      },
+      include: opportunityDetailInclude,
     });
 
     if (!opportunity) {
       return res.status(404).json({ success: false, error: 'Opportunity not found' });
     }
 
-    res.json({ success: true, data: opportunity });
+    res.json({ success: true, data: mapOpportunity(opportunity) });
   } catch (error) {
     console.error('Get opportunity error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch opportunity' });
@@ -153,14 +255,13 @@ router.post('/', authorize('Opportunity', 'create'), async (req: AuthRequest, re
         lostReason: data.lostReason,
       },
       include: {
-        lead: { select: { id: true, firstName: true, lastName: true } },
-        owner: { select: { id: true, firstName: true, lastName: true } },
+        ...opportunityInclude,
       },
     });
 
     await auditLog(tenantId, userId, 'CREATE', 'Opportunity', opportunity.id, null, { name: data.name, stage: data.stage, amount: data.amount });
 
-    res.status(201).json({ success: true, data: opportunity });
+    res.status(201).json({ success: true, data: mapOpportunity(opportunity) });
   } catch (error: any) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ success: false, error: error.errors[0].message });
@@ -206,11 +307,12 @@ router.put('/:id', authorize('Opportunity', 'edit'), async (req: AuthRequest, re
         ...data,
         expectedCloseDate: data.expectedCloseDate ? new Date(data.expectedCloseDate) : undefined,
       },
+      include: opportunityInclude,
     });
 
     await auditLog(tenantId, userId, 'UPDATE', 'Opportunity', opportunity.id, existing, opportunity);
 
-    res.json({ success: true, data: opportunity });
+    res.json({ success: true, data: mapOpportunity(opportunity) });
   } catch (error: any) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ success: false, error: error.errors[0].message });
@@ -244,11 +346,12 @@ router.patch('/:id/stage', authorize('Opportunity', 'edit'), async (req: AuthReq
     const opportunity = await prisma.opportunity.update({
       where: { id: req.params.id },
       data: updateData,
+      include: opportunityInclude,
     });
 
     await auditLog(tenantId, userId, 'UPDATE', 'Opportunity', opportunity.id, existing, parsedStage);
 
-    res.json({ success: true, data: opportunity });
+    res.json({ success: true, data: mapOpportunity(opportunity) });
   } catch (error) {
     console.error('Update opportunity stage error:', error);
     res.status(500).json({ success: false, error: 'Failed to update opportunity stage' });
