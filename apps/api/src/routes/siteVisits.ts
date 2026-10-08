@@ -15,6 +15,7 @@ import { getNextSiteVisitNumber, normalizeOverdueSiteVisits } from '../services/
 import { canTransitionStatus } from '../services/workflow';
 import { createOwnerHistory } from '../services/ownerHistory';
 import { checkSiteVisitLocation } from '../services/siteVisitLocation';
+import { findApplicableRRQueue, RoundRobinAssignmentService } from '../services/rrQueue';
 
 const router = Router();
 
@@ -318,7 +319,17 @@ router.patch('/:id/complete', authorize('SiteVisit', 'edit'), async (req: AuthRe
     const existing = await prisma.siteVisit.findFirst({
       where: { id: req.params.id, tenantId },
       include: {
-        lead: { select: { id: true, status: true } },
+        lead: {
+          select: {
+            id: true,
+            status: true,
+            ownerId: true,
+            source: true,
+            leadSubSource: true,
+            rating: true,
+            owner: { select: { profile: { select: { name: true } } } },
+          },
+        },
         project: { select: { name: true, latitude: true, longitude: true } },
       },
     });
@@ -390,6 +401,41 @@ router.patch('/:id/complete', authorize('SiteVisit', 'edit'), async (req: AuthRe
         });
         leadStatus = lead.status;
 
+        if (existing.lead.owner?.profile?.name === 'SVC') {
+          const rrQueue = await findApplicableRRQueue(tenantId, {
+            projectId: existing.projectId,
+            status: lead.status,
+            source: existing.lead.source,
+            secondarySource: existing.lead.leadSubSource,
+            priority: existing.lead.rating,
+          }, tx);
+          if (!rrQueue) {
+            throw new Error('PROJECT_RR_QUEUE_NOT_FOUND');
+          }
+          const assignment = await RoundRobinAssignmentService.assignLeadInTransaction(
+            tx,
+            rrQueue.id,
+            existing.leadId,
+            tenantId,
+          );
+          const newOwner = await tx.user.findFirst({
+            where: { id: assignment.assignedUserId, tenantId },
+            select: { profile: { select: { name: true } } },
+          });
+          await createOwnerHistory({
+            tenantId,
+            leadId: existing.leadId,
+            previousOwnerId: existing.lead.ownerId,
+            newOwnerId: assignment.assignedUserId,
+            previousProfile: 'SVC',
+            newProfile: newOwner?.profile?.name || null,
+            previousStatus: existing.lead.status,
+            newStatus: lead.status,
+            handoffReason: `Site Visit completed for project ${existing.projectId}`,
+            changedById: userId,
+          }, tx);
+        }
+
         await tx.auditLog.create({
           data: {
             tenantId,
@@ -422,6 +468,9 @@ router.patch('/:id/complete', authorize('SiteVisit', 'edit'), async (req: AuthRe
 
     res.json({ success: true, data: result });
   } catch (error) {
+    if (error instanceof Error && error.message === 'PROJECT_RR_QUEUE_NOT_FOUND') {
+      return res.status(409).json({ success: false, error: 'No Round Robin queue is configured for this project and lead source. The Site Visit remains scheduled.' });
+    }
     console.error('Complete site visit error:', error);
     res.status(500).json({ success: false, error: 'Failed to complete site visit' });
   }
@@ -539,7 +588,16 @@ router.post('/:id/revisit', authorize('SiteVisit', 'create'), async (req: AuthRe
     const existing = await prisma.siteVisit.findFirst({
       where: { id: req.params.id, tenantId },
       include: {
-        lead: { select: { id: true, status: true, ownerId: true } },
+        lead: {
+          select: {
+            id: true,
+            status: true,
+            ownerId: true,
+            source: true,
+            leadSubSource: true,
+            rating: true,
+          },
+        },
         project: { select: { id: true } },
       },
     });
@@ -560,21 +618,41 @@ router.post('/:id/revisit', authorize('SiteVisit', 'create'), async (req: AuthRe
       : `Revisit reason: ${reason}`;
 
     const result = await prisma.$transaction(async (tx) => {
+      const project = await tx.project.findFirst({
+        where: { id: parsed.data.projectId, tenantId, isActive: true },
+        select: { id: true },
+      });
+      if (!project) throw new Error('PROJECT_NOT_AVAILABLE');
+
+      const sameProject = existing.projectId === parsed.data.projectId;
+      let rrQueue: Awaited<ReturnType<typeof findApplicableRRQueue>> = null;
+      if (!sameProject) {
+        rrQueue = await findApplicableRRQueue(tenantId, {
+          projectId: parsed.data.projectId,
+          status: existing.lead?.status,
+          source: existing.lead?.source,
+          secondarySource: existing.lead?.leadSubSource,
+          priority: existing.lead?.rating,
+        }, tx);
+        if (!rrQueue) throw new Error('PROJECT_RR_QUEUE_NOT_FOUND');
+      }
+
       const siteVisitNumber = await getNextSiteVisitNumber(tx, tenantId);
-      const assigneeId = parsed.data.assigneeId || existing.assigneeId;
+      const queueId = sameProject ? existing.queueId : rrQueue?.id ?? null;
       const siteVisit = await tx.siteVisit.create({
         data: {
           tenantId,
           leadId: existing.leadId,
           projectId: parsed.data.projectId,
-          assigneeId,
+          assigneeId: sameProject ? existing.assigneeId : null,
           creatorId: userId,
-          queueId: existing.queueId,
+          queueId,
           siteVisitNumber,
           previousSiteVisitId: existing.id,
           scheduledAt: new Date(parsed.data.scheduledAt),
           status: 'SCHEDULED',
           notes: revisitNotes,
+          visitType: sameProject ? 'REVISIT' : undefined,
         },
         include: {
           lead: { select: { id: true, firstName: true, lastName: true } },
@@ -583,23 +661,21 @@ router.post('/:id/revisit', authorize('SiteVisit', 'create'), async (req: AuthRe
         },
       });
 
-      if (assigneeId && assigneeId !== existing.lead?.ownerId) {
-        await tx.lead.update({
-          where: { id: existing.leadId },
-          data: { ownerId: assigneeId },
-        });
-        await createOwnerHistory({
-          tenantId,
-          leadId: existing.leadId,
-          previousOwnerId: existing.lead?.ownerId || null,
-          newOwnerId: assigneeId,
-          previousProfile: null,
-          newProfile: null,
-          previousStatus: existing.lead?.status || null,
-          newStatus: existing.lead?.status || null,
-          handoffReason: 'Site Visit revisit assignment',
-          changedById: userId,
-        }, tx);
+      if (!sameProject && rrQueue) {
+        try {
+          await RoundRobinAssignmentService.assignSiteVisitInTransaction(
+            tx,
+            rrQueue.id,
+            siteVisit.id,
+            existing.leadId,
+            tenantId,
+          );
+        } catch (error) {
+          if (error instanceof Error && error.message === 'NO_ELIGIBLE_USER') {
+            throw new Error('PROJECT_RR_QUEUE_HAS_NO_ACTIVE_MEMBERS');
+          }
+          throw error;
+        }
       }
 
       await tx.auditLog.create({
@@ -616,15 +692,34 @@ router.post('/:id/revisit', authorize('SiteVisit', 'create'), async (req: AuthRe
             reason,
             scheduledAt: parsed.data.scheduledAt,
             leadId: existing.leadId,
+            projectId: parsed.data.projectId,
+            assignedToProjectRoundRobin: !sameProject,
           },
         },
       });
 
-      return siteVisit;
+      return tx.siteVisit.findUniqueOrThrow({
+        where: { id: siteVisit.id },
+        include: {
+          lead: { select: { id: true, firstName: true, lastName: true } },
+          project: { select: { id: true, name: true } },
+          assignee: { select: { id: true, firstName: true, lastName: true } },
+          previousSiteVisit: { select: { id: true, status: true, scheduledAt: true, siteVisitNumber: true } },
+        },
+      });
     });
 
     res.status(201).json({ success: true, data: result });
   } catch (error) {
+    if (error instanceof Error && error.message === 'PROJECT_NOT_AVAILABLE') {
+      return res.status(404).json({ success: false, error: 'Project not found' });
+    }
+    if (error instanceof Error && error.message === 'PROJECT_RR_QUEUE_NOT_FOUND') {
+      return res.status(409).json({ success: false, error: 'No Round Robin queue is configured for the selected project and lead source.' });
+    }
+    if (error instanceof Error && error.message === 'PROJECT_RR_QUEUE_HAS_NO_ACTIVE_MEMBERS') {
+      return res.status(409).json({ success: false, error: 'The selected project Round Robin queue has no active Sales members.' });
+    }
     console.error('Revisit site visit error:', error);
     res.status(500).json({ success: false, error: 'Failed to create revisit site visit' });
   }

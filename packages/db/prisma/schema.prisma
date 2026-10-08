@@ -75,6 +75,7 @@ model Tenant {
   notifications         Notification[]
   leads                 Lead[]
   companies             Company[]
+  enquiries             Enquiry[]
   siteVisits            SiteVisit[]
   opportunities         Opportunity[]
   quotations            Quotation[]
@@ -647,6 +648,13 @@ model Lead {
   creatorId  String
   creator    User     @relation("LeadCreator", fields: [creatorId], references: [id])
   leadNumber String?
+  firstSubSource String?
+  lastSource String?
+  lastSubSource String?
+  lastCampaign String?
+  leadType String?
+  lastReEngagedAt DateTime?
+  lostAt DateTime?
   rrQueueId  String?
   rrQueue    RRQueue? @relation(fields: [rrQueueId], references: [id])
   queueId    String?
@@ -665,7 +673,7 @@ model Lead {
   secondaryPhone String?
   tertiaryPhone String?
   alternateEmail String?
-  website      String?
+  website    String?
 
   // Standard Lead Fields - Company Information
   company           String
@@ -684,9 +692,9 @@ model Lead {
   budget       Float?
   requirements String?
   notes        String?
+  customFields Json   @default("{}")
   leadSubSource String?
   campaign      String?
-  leadType      String?
   preferredLocation String?
   occupation    String?
   dateOfBirth   DateTime?
@@ -716,6 +724,7 @@ model Lead {
   updatedAt DateTime @updatedAt
 
   siteVisits    SiteVisit[]
+  enquiries     Enquiry[]
   opportunities Opportunity[]
   quotations    Quotation[]
   bookings      Booking[]
@@ -775,6 +784,46 @@ model Company {
   @@index([tenantId, name])
   @@index([tenantId, phone])
   @@index([tenantId, email])
+}
+
+model Enquiry {
+  id                   String   @id @default(cuid())
+  enquiryNumber        String
+  tenantId             String
+  tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  leadId               String
+  lead                 Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  leadType             String
+  enquiryType          String
+  source               String
+  subSource            String?
+  campaignId           String?
+  campaign             String?
+  subCampaignId        String?
+  subCampaign          String?
+  projectId            String?
+  project              Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  phone                String?
+  secondaryPhone       String?
+  tertiaryPhone        String?
+  countryCode          String?
+  secondaryCountryCode String?
+  email                String?
+  secondaryEmail       String?
+  medium               String?
+  description          String?
+  channelPartner       String?
+  details              Json?
+  enquiryDate          DateTime @default(now())
+  createdById          String?
+  updatedById          String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([tenantId, enquiryNumber])
+  @@index([tenantId, leadId, createdAt])
+  @@index([tenantId, phone])
+  @@index([tenantId, projectId])
 }
 
 // ============================================
@@ -1095,6 +1144,7 @@ model Project {
   units         Unit[]
   leads         Lead[]
   siteVisits    SiteVisit[]
+  enquiries     Enquiry[]
   opportunities Opportunity[]
   quotations    Quotation[]
   bookings      Booking[]

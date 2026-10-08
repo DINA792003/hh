@@ -9,6 +9,7 @@ import rateLimit from 'express-rate-limit';
 
 import { authRoutes as authRouter } from './routes/auth';
 import { leadRoutes as leadRouter } from './routes/leads';
+import enquiryRouter from './routes/enquiries';
 import siteVisitRouter from './routes/siteVisits';
 import opportunityRouter from './routes/opportunities';
 import quotationRouter from './routes/quotations';
@@ -85,6 +86,7 @@ export const createApp = () => {
 
   app.use('/api/auth', authRouter);
   app.use('/api/leads', leadRouter);
+  app.use('/api/enquiries', enquiryRouter);
   app.use('/api/site-visits', siteVisitRouter);
   app.use('/api/opportunities', opportunityRouter);
   app.use('/api/quotations', quotationRouter);

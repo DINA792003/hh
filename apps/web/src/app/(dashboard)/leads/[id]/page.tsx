@@ -63,6 +63,7 @@ import {
   Map,
   TrendingUp,
   History,
+  Inbox,
   ArrowLeft,
   AlertTriangle,
   ArrowRight,
@@ -160,6 +161,17 @@ interface LeadData {
   updatedAt: string;
 }
 
+interface LeadEnquiry {
+  id: string;
+  enquiryNumber: string;
+  enquiryType: string;
+  source: string;
+  subSource?: string | null;
+  project?: { id: string; name: string } | null;
+  enquiryDate: string;
+  createdAt: string;
+}
+
 const LEAD_EDITABLE_FIELDS = [
   "salutation",
   "firstName",
@@ -240,6 +252,9 @@ export default function LeadDetailPage() {
   const [auditTotalPages, setAuditTotalPages] = React.useState(1);
   const [auditTotal, setAuditTotal] = React.useState(0);
   const [auditLoading, setAuditLoading] = React.useState(false);
+  const [enquiries, setEnquiries] = React.useState<LeadEnquiry[]>([]);
+  const [enquiriesLoading, setEnquiriesLoading] = React.useState(false);
+  const [enquiriesError, setEnquiriesError] = React.useState<string | null>(null);
 
   const [isEditing, setIsEditing] = React.useState(false);
   const [editData, setEditData] = React.useState<Record<string, any>>({});
@@ -354,6 +369,22 @@ export default function LeadDetailPage() {
     [leadId, toast],
   );
 
+  const fetchEnquiries = React.useCallback(async () => {
+    setEnquiriesLoading(true);
+    setEnquiriesError(null);
+    try {
+      const response = await leadApi.getEnquiries(leadId, { page: 1, limit: 100 });
+      if (!response.data.success) {
+        throw new Error(response.data.error || "Failed to load enquiries");
+      }
+      setEnquiries(response.data.data || []);
+    } catch (error: any) {
+      setEnquiriesError(error?.response?.data?.error || error?.message || "Failed to load enquiries.");
+    } finally {
+      setEnquiriesLoading(false);
+    }
+  }, [leadId]);
+
   const loadProjects = React.useCallback((force = false) => {
     if (!force && projectsLoaded.current) return Promise.resolve();
     if (projectsRequest.current) return projectsRequest.current;
@@ -394,6 +425,12 @@ export default function LeadDetailPage() {
       fetchAuditHistory(1);
     }
   }, [activeTab, auditLogs.length, auditLoading, fetchAuditHistory]);
+
+  React.useEffect(() => {
+    if (activeTab === "enquiries") {
+      void fetchEnquiries();
+    }
+  }, [activeTab, fetchEnquiries]);
 
   React.useEffect(() => {
     if (siteVisitDialogOpen || revisitDialogOpen || createBookingDialogOpen || createOppDialogOpen) {
@@ -1403,6 +1440,14 @@ export default function LeadDetailPage() {
           <TabsTrigger value="overview" className="gap-2">
             <User className="h-4 w-4" />Overview
           </TabsTrigger>
+          <TabsTrigger value="enquiries" className="gap-2">
+            <Inbox className="h-4 w-4" />Enquiries
+            {enquiries.length > 0 && (
+              <Badge variant="secondary" className="ml-1 h-5 min-w-5 justify-center px-1.5 text-[11px]">
+                {enquiries.length}
+              </Badge>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="owner-history" className="gap-2">
             <History className="h-4 w-4" />Owner History
           </TabsTrigger>
@@ -1436,6 +1481,63 @@ export default function LeadDetailPage() {
             </TabsTrigger>
           )}
         </TabsList>
+
+        {/* Enquiries Tab */}
+        <TabsContent value="enquiries">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium">Enquiries</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {enquiriesLoading ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">Loading enquiries...</p>
+              ) : enquiriesError ? (
+                <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+                  {enquiriesError}
+                </div>
+              ) : enquiries.length > 0 ? (
+                <div className="space-y-3">
+                  {enquiries.map((enquiry) => (
+                    <button
+                      key={enquiry.id}
+                      type="button"
+                      onClick={() => router.push(`/enquiries/${enquiry.id}`)}
+                      className="w-full rounded-md border p-4 text-left transition-colors hover:bg-muted/50"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-sm font-medium">{enquiry.enquiryNumber}</span>
+                        <Badge variant="outline">{enquiry.enquiryType.replaceAll("_", " ")}</Badge>
+                      </div>
+                      <dl className="mt-3 grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                        <div>
+                          <dt className="text-xs text-muted-foreground">Enquiry Source</dt>
+                          <dd className="font-medium">{enquiry.source || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-xs text-muted-foreground">Sub Source</dt>
+                          <dd className="font-medium">{enquiry.subSource || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-xs text-muted-foreground">Project</dt>
+                          <dd className="font-medium">{enquiry.project?.name || "—"}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-xs text-muted-foreground">Enquiry Date</dt>
+                          <dd className="font-medium">{formatDateTime(enquiry.enquiryDate || enquiry.createdAt)}</dd>
+                        </div>
+                      </dl>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="py-8 text-center text-muted-foreground">
+                  <Inbox className="mx-auto mb-4 h-12 w-12 opacity-50" />
+                  <p>No enquiries recorded for this lead.</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         {/* Overview Tab */}
         <TabsContent value="overview" className="space-y-6">

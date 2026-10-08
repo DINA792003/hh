@@ -90,6 +90,14 @@ export const leadApi = {
     api.post<ApiResponse>(`/api/leads/${id}/convert`, data || {}),
   getAuditHistory: (id: string, params?: Record<string, any>) =>
     api.get<ApiResponse>(`/api/leads/${id}/audit-history`, { params }),
+  getEnquiries: (id: string, params?: Record<string, any>) =>
+    api.get<ApiResponse>(`/api/leads/${id}/enquiries`, { params }),
+};
+
+// Enquiry API
+export const enquiryApi = {
+  get: (id: string) =>
+    api.get<ApiResponse>(`/api/enquiries/${id}`),
 };
 
 // Site Visit API

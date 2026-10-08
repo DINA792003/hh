@@ -3,14 +3,28 @@ import type { Server } from 'http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const database = vi.hoisted(() => ({
+  leadCreate: vi.fn(),
   leadFindFirst: vi.fn(),
+  leadFindMany: vi.fn(),
+  leadFindUnique: vi.fn(),
   projectFindFirst: vi.fn(),
+  sequenceUpsert: vi.fn(),
   transaction: vi.fn(),
+}));
+
+const rrQueue = vi.hoisted(() => ({
+  assignLeadInTransaction: vi.fn(),
+  findApplicableRRQueue: vi.fn(),
 }));
 
 vi.mock('@dct-crm/db', () => ({
   prisma: {
-    lead: { findFirst: database.leadFindFirst },
+    lead: {
+      create: database.leadCreate,
+      findFirst: database.leadFindFirst,
+      findMany: database.leadFindMany,
+      findUnique: database.leadFindUnique,
+    },
     $transaction: database.transaction,
   },
 }));
@@ -51,6 +65,15 @@ vi.mock('../services/recordAccess', () => ({
 vi.mock('../services/leadWorkflowExtras', () => ({
   getNextSiteVisitNumber: vi.fn(),
   normalizeOverdueSiteVisits: vi.fn(),
+}));
+
+vi.mock('../services/rrQueue', () => ({
+  findApplicableRRQueue: rrQueue.findApplicableRRQueue,
+  hasLeadAssignmentRelevantChanges: vi.fn(),
+  isLeadEligibleForAutoAssignment: () => true,
+  RoundRobinAssignmentService: {
+    assignLeadInTransaction: rrQueue.assignLeadInTransaction,
+  },
 }));
 
 vi.mock('../services/leadOwnerChange', () => ({
@@ -103,9 +126,21 @@ beforeEach(() => {
     owner: { id: 'svc-a', firstName: 'SVC', lastName: 'User' },
   });
   database.projectFindFirst.mockResolvedValue(null);
+  database.leadFindMany.mockResolvedValue([]);
   database.transaction.mockImplementation((callback: (tx: unknown) => Promise<unknown>) =>
-    callback({ project: { findFirst: database.projectFindFirst } }),
+    callback({
+      lead: {
+        create: database.leadCreate,
+        findFirst: database.leadFindFirst,
+        findMany: database.leadFindMany,
+        findUnique: database.leadFindUnique,
+      },
+      project: { findFirst: database.projectFindFirst },
+      sequence: { upsert: database.sequenceUpsert },
+      auditLog: { create: vi.fn() },
+    }),
   );
+  database.sequenceUpsert.mockResolvedValue({ nextValue: 1 });
 });
 
 afterEach(async () => {
@@ -179,5 +214,55 @@ describe('POST /api/leads/:id/convert project validation', () => {
     });
     expect(database.projectFindFirst).not.toHaveBeenCalled();
     expect(tx.lead.findFirst).toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/leads Round Robin assignment', () => {
+  it('creates the lead when a matching queue has no eligible Sales user and reports the pending assignment', async () => {
+    const createdLead = {
+      id: 'lead-new',
+      leadNumber: 'LN000001',
+      firstName: 'New',
+      lastName: 'Customer',
+      company: 'Example',
+      source: 'WEBSITE',
+      projectId: 'project-a',
+      project: { id: 'project-a', name: 'Project A' },
+      owner: { id: 'admin-a', firstName: 'Admin', lastName: 'User' },
+    };
+    database.leadCreate.mockResolvedValue(createdLead);
+    rrQueue.findApplicableRRQueue.mockResolvedValue({ id: 'queue-a' });
+    rrQueue.assignLeadInTransaction.mockRejectedValue(new Error('NO_ELIGIBLE_USER'));
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api/leads', leadsRouter);
+    const server = app.listen(0);
+    servers.push(server);
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP server address');
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/leads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lastName: 'Customer',
+        company: 'Example',
+        phone: '9876543210',
+        source: 'WEBSITE',
+        projectId: 'project-a',
+      }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(database.leadCreate).toHaveBeenCalledOnce();
+    expect(body).toMatchObject({
+      success: true,
+      data: {
+        id: 'lead-new',
+        assignmentWarning: expect.stringContaining('no eligible Sales user'),
+      },
+    });
   });
 });

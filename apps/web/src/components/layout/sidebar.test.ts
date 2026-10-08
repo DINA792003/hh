@@ -65,12 +65,13 @@ describe('role-based sidebar matrix', () => {
     ]);
   });
 
-  it('Admin keeps the original module list with Pre Sales, Sales, and SVC added', () => {
+  it('Admin sees GRE Forms and Setup Home with Pre Sales, Sales, and SVC', () => {
     const nav = getNavigationByProfile('Admin', [], withPerms(...allPerms), false, true);
     expect(nav.map((item) => item.title)).toEqual([
       'Home', 'Leads', 'Site Visits', 'Opportunities', 'Quotations', 'Bookings', 'Payments',
-      'Projects', 'Tasks', 'Pre Sales', 'Sales', 'SVC', 'Reports', 'Setup Home',
+      'Projects', 'Tasks', 'Pre Sales', 'Sales', 'SVC', 'Reports', 'GRE Forms', 'Setup Home',
     ]);
+    expect(nav.some((item) => item.href === '/setup/developer/gre')).toBe(true);
     expect(nav.some((item) => item.title === 'Pre Sales' && item.href === '/profiles/pre-sales')).toBe(true);
     expect(nav.some((item) => item.title === 'Sales' && item.href === '/profiles/sales')).toBe(true);
     expect(nav.some((item) => item.title === 'SVC' && item.href === '/profiles/svc')).toBe(true);
@@ -85,13 +86,14 @@ describe('role-based sidebar matrix', () => {
     expect(nav.some((item) => item.title === 'Tasks')).toBe(true);
     expect(nav.some((item) => item.title === 'Followups')).toBe(true);
     expect(nav.some((item) => item.title === 'Setup Home')).toBe(false);
+    expect(nav.some((item) => item.title === 'GRE Forms')).toBe(false);
   });
 
   it('Superadmin sees Companies and every module plus Setup Home', () => {
     const nav = getNavigationByProfile(undefined, [], withPerms(...allPerms), true, true);
     expect(nav.map((item) => item.title)).toEqual([
       'Home', 'Companies', 'Leads', 'Site Visits', 'Opportunities', 'Quotations', 'Bookings',
-      'Payments', 'Projects', 'Tasks', 'Reports', 'Setup Home',
+      'Payments', 'Projects', 'Tasks', 'Reports', 'GRE Forms', 'Setup Home',
     ]);
   });
 });

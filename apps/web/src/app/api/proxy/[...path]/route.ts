@@ -20,6 +20,11 @@ async function proxyRequest(
     headers['content-type'] = contentType;
   }
 
+  const greSessionHeader = request.headers.get('x-gre-session');
+  if (greSessionHeader) {
+    headers['x-gre-session'] = greSessionHeader;
+  }
+
   const init: RequestInit = {
     method,
     headers,

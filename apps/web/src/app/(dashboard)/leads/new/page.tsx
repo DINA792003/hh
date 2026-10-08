@@ -176,8 +176,11 @@ export default function NewLeadPage() {
         }
       }
 
-      await leadApi.create(payload);
-      toast({ title: "Success", description: "Lead created successfully" });
+      const response = await leadApi.create(payload);
+      const assignmentWarning = response.data?.data?.assignmentWarning;
+      toast(assignmentWarning
+        ? { title: "Lead created, assignment pending", description: assignmentWarning, variant: "destructive" }
+        : { title: "Success", description: "Lead created successfully" });
       router.push("/leads");
     } catch (err: any) {
       const message =

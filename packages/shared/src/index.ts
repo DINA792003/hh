@@ -87,6 +87,19 @@ export const loginSchema = z.object({
 // CRM SCHEMAS
 // ============================================
 
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(jsonValueSchema),
+    z.record(z.string(), jsonValueSchema),
+  ]),
+);
+
 export const leadSchema = z.object({
   firstName: z.string().optional(),
   lastName: z.string({
@@ -125,6 +138,7 @@ export const leadSchema = z.object({
   budget: z.number().optional(),
   requirements: z.string().optional(),
   notes: z.string().optional(),
+  customFields: z.record(z.string(), jsonValueSchema).optional(),
   ownerId: z.string().optional(),
   projectId: z.string().nullable().optional(),
 }).strict();

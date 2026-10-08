@@ -21,6 +21,7 @@ import {
   FolderKanban,
   CheckSquare,
   BarChart3,
+  FileCode2,
   Settings,
   ChevronRight,
   Clock3,
@@ -99,6 +100,7 @@ export function getNavigationByProfile(
   }
 
   if (isSuperAdmin || isAdmin) {
+    nav.push({ title: "GRE Forms", href: "/setup/developer/gre", icon: FileCode2 });
     nav.push({ title: "Setup Home", href: "/setup", icon: Settings });
   }
 

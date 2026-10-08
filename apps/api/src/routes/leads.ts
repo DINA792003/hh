@@ -1,8 +1,9 @@
 import { Router, Response } from 'express';
 import { prisma } from '@dct-crm/db';
-import { leadCreateSchema, leadUpdateSchema, normalizePhone, PHONE_DUPLICATE_ERROR } from '@dct-crm/shared';
+import { leadCreateSchema, leadUpdateSchema, normalizePhone, PHONE_DUPLICATE_ERROR, type JsonValue } from '@dct-crm/shared';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { authorize } from '../middleware/authorization';
+import { EffectivePermissionService } from '../services/effectivePermissions';
 import { canTransitionStatus, isValidStatus } from '../services/workflow';
 import { createOwnerHistory, getOwnerHistory } from '../services/ownerHistory';
 import {
@@ -11,7 +12,10 @@ import {
   leadScopeClause,
 } from '../services/recordAccess';
 import { getNextSiteVisitNumber, normalizeOverdueSiteVisits } from '../services/leadWorkflowExtras';
+import { validateFieldValue } from '../services/metadata';
 import { changeLeadOwner, getEligibleLeadOwners } from '../services/leadOwnerChange';
+import { processLeadEnquiry, sourceEnumValue } from '../services/enquiryProcessing';
+import { getLeadEnquiries } from '../services/enquiryService';
 import {
   findApplicableRRQueue,
   hasLeadAssignmentRelevantChanges,
@@ -31,6 +35,65 @@ router.use(authenticate);
  */
 function leadIdScope(req: AuthRequest): { tenantId?: string } {
   return req.user!.isSuperAdmin ? {} : { tenantId: req.tenantId! };
+}
+
+async function validateLeadCustomFields(
+  tenantId: string,
+  values: Record<string, unknown>,
+  requireRequiredFields: boolean,
+): Promise<string | null> {
+  const leadObject = await prisma.objectDefinition.findFirst({
+    where: { tenantId, name: 'Lead', isActive: true },
+    select: { id: true },
+  });
+  if (!leadObject) {
+    return Object.keys(values).length ? 'Lead field metadata is not configured' : null;
+  }
+
+  const definitions = await prisma.fieldDefinition.findMany({
+    where: {
+      tenantId,
+      objectId: leadObject.id,
+      isActive: true,
+      isCustomField: true,
+      isStandardField: false,
+    },
+    include: { picklistValues: { where: { isActive: true } } },
+  });
+  const definitionByName = new Map(definitions.map((field) => [field.name, field]));
+
+  for (const name of Object.keys(values)) {
+    if (!definitionByName.has(name)) return `Unknown Lead field: ${name}`;
+  }
+
+  for (const field of definitions) {
+    const hasValue = Object.prototype.hasOwnProperty.call(values, field.name);
+    if (!hasValue) {
+      if (requireRequiredFields && field.required) return `${field.label} is required`;
+      continue;
+    }
+    const value = values[field.name];
+    const validation = validateFieldValue(field, value);
+    if (!validation.valid) return validation.error || `Invalid value for ${field.label}`;
+    if (
+      field.fieldType === 'picklist' &&
+      value !== null &&
+      value !== undefined &&
+      value !== '' &&
+      !field.picklistValues.some((option) => option.value === value)
+    ) {
+      return `${field.label} has an invalid value`;
+    }
+    if (
+      field.fieldType === 'multiPicklist' &&
+      Array.isArray(value) &&
+      !value.every((option) => field.picklistValues.some((item) => item.value === option))
+    ) {
+      return `${field.label} has an invalid value`;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -119,18 +182,6 @@ async function enrichAuditLogs<T extends { oldValues?: unknown; newValues?: unkn
   }));
 }
 
-async function getNextLeadNumber(tenantId: string): Promise<string> {
-  const sequence = await prisma.$transaction(async (tx) => {
-    const seq = await tx.sequence.upsert({
-      where: { tenantId_type: { tenantId, type: 'LEAD' } },
-      update: { nextValue: { increment: 1 } },
-      create: { tenantId, type: 'LEAD', nextValue: 1 },
-    });
-    return seq;
-  });
-  return `LN${String(sequence.nextValue).padStart(6, '0')}`;
-}
-
 const convertLeadSchema = z.object({
   projectId: z.string().optional(),
   unitId: z.string().optional(),
@@ -213,12 +264,32 @@ const LEAD_DIFFABLE_FIELDS = [
   'source', 'status', 'rating', 'description', 'street', 'city',
   'stateProvince', 'country', 'postalCode', 'score', 'budget',
   'requirements', 'notes', 'ownerId', 'projectId',
+  'customFields',
 ] as const;
 
 function normalizeDiffValue(value: any): any {
   if (value === undefined) return null;
   if (value === '') return null;
   return value;
+}
+
+function areJsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => areJsonValuesEqual(value, right[index]));
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) =>
+      Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+      areJsonValuesEqual(leftRecord[key], rightRecord[key]),
+    );
 }
 
 function computeLeadDiff(
@@ -233,7 +304,11 @@ function computeLeadDiff(
     if (!(field in incoming)) continue;
     const incomingValue = normalizeDiffValue((incoming as Record<string, any>)[field]);
     const existingValue = normalizeDiffValue(existing[field]);
-    if (incomingValue === existingValue) continue;
+    if (
+      field === 'customFields'
+        ? areJsonValuesEqual(incomingValue, existingValue)
+        : incomingValue === existingValue
+    ) continue;
     oldValues[field] = existingValue;
     newValues[field] = incomingValue;
     updateData[field] = (incoming as Record<string, any>)[field] === '' ? null : (incoming as Record<string, any>)[field];
@@ -325,6 +400,144 @@ router.get('/', authorize('Lead', 'read'), async (req: AuthRequest, res: Respons
   } catch (error) {
     console.error('Get leads error:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch leads' });
+  }
+});
+
+router.get('/:id/enquiries', authorize('Enquiry', 'read'), async (req: AuthRequest, res: Response) => {
+  try {
+    const lead = await prisma.lead.findFirst({
+      where: { id: req.params.id, ...leadIdScope(req) },
+      select: { id: true, tenantId: true, ownerId: true, creatorId: true },
+    });
+    if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
+    if (!(await canAccessLead(req.user!, lead))) {
+      return res.status(403).json({ success: false, error: 'You do not have access to this lead' });
+    }
+
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit || '10'), 10) || 10));
+    const result = await getLeadEnquiries(lead.tenantId, lead.id, page, limit);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Get Lead enquiries error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch Lead enquiries' });
+  }
+});
+
+router.post('/:id/enquiries', authorize('Enquiry', 'create'), async (req: AuthRequest, res: Response) => {
+  try {
+    const payloadSchema = z.object({
+      source: z.string().trim().min(1).max(120),
+      subSource: z.string().trim().max(120).optional(),
+      campaignId: z.string().trim().optional(),
+      campaign: z.string().trim().max(160).optional(),
+      subCampaignId: z.string().trim().optional(),
+      subCampaign: z.string().trim().max(160).optional(),
+      projectId: z.string().trim().optional(),
+      phone: z.string().trim().max(64).optional(),
+      secondaryPhone: z.string().trim().max(64).optional(),
+      tertiaryPhone: z.string().trim().max(64).optional(),
+      countryCode: z.string().trim().max(8).optional(),
+      secondaryCountryCode: z.string().trim().max(8).optional(),
+      email: z.string().trim().email().optional().or(z.literal('')),
+      secondaryEmail: z.string().trim().email().optional().or(z.literal('')),
+      medium: z.string().trim().max(120).optional(),
+      description: z.string().trim().max(5000).optional(),
+      channelPartner: z.string().trim().max(160).optional(),
+      enquiryDate: z.coerce.date().optional(),
+      details: z.record(z.string(), z.unknown()).optional(),
+      siteVisit: z.object({
+        projectId: z.string().trim().optional(),
+        scheduledAt: z.coerce.date(),
+        notes: z.string().trim().max(5000).optional(),
+      }).optional(),
+    });
+    const payload = payloadSchema.parse(req.body);
+    const existing = await prisma.lead.findFirst({
+      where: { id: req.params.id, ...leadIdScope(req) },
+    });
+    if (!existing) return res.status(404).json({ success: false, error: 'Lead not found' });
+    if (!(await canAccessLead(req.user!, existing))) {
+      return res.status(403).json({ success: false, error: 'You do not have access to this lead' });
+    }
+    if (
+      payload.siteVisit &&
+      !req.user!.isSuperAdmin &&
+      !(await EffectivePermissionService.hasPermission(req.user!.id, 'SITE_VISIT_CREATE'))
+    ) {
+      return res.status(403).json({ success: false, error: 'Insufficient permissions for SiteVisit:create' });
+    }
+
+    const leadData = leadCreateSchema.parse({
+      firstName: existing.firstName || undefined,
+      lastName: existing.lastName,
+      company: existing.company,
+      source: sourceEnumValue(payload.source),
+      phone: payload.phone || existing.phone,
+      email: payload.email || existing.email || undefined,
+      projectId: payload.projectId || undefined,
+      customFields: existing.customFields,
+    });
+    const result = await processLeadEnquiry({
+      tenantId: existing.tenantId,
+      userId: req.user!.id,
+      profileName: req.user!.profileName,
+      expectedLeadId: existing.id,
+      lead: leadData,
+      enquiry: {
+        source: payload.source,
+        subSource: payload.subSource,
+        campaignId: payload.campaignId,
+        campaign: payload.campaign,
+        subCampaignId: payload.subCampaignId,
+        subCampaign: payload.subCampaign,
+        secondaryPhone: payload.secondaryPhone,
+        tertiaryPhone: payload.tertiaryPhone,
+        secondaryCountryCode: payload.secondaryCountryCode,
+        countryCode: payload.countryCode,
+        secondaryEmail: payload.secondaryEmail,
+        medium: payload.medium,
+        description: payload.description,
+        channelPartner: payload.channelPartner,
+        enquiryDate: payload.enquiryDate,
+        details: payload.details,
+      },
+      siteVisit: payload.siteVisit
+        ? {
+            projectId: payload.siteVisit.projectId || payload.projectId,
+            scheduledAt: payload.siteVisit.scheduledAt,
+            notes: payload.siteVisit.notes,
+          }
+        : undefined,
+    });
+    if (result.action === 'DUPLICATE_CONFLICT') {
+      return res.status(409).json({
+        success: false,
+        action: result.action,
+        leadIds: result.leadIds,
+        error: 'This phone number matches multiple existing Leads. Ask an administrator to resolve the duplicate records.',
+      });
+    }
+    if (result.action === 'LEAD_MISMATCH') {
+      return res.status(409).json({
+        success: false,
+        leadIds: result.leadIds,
+        error: 'The enquiry phone number matches a different Lead. Create this enquiry from that Lead instead.',
+      });
+    }
+    return res.status(201).json({ success: true, ...result });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ success: false, error: error.issues[0]?.message || 'Invalid enquiry data' });
+    }
+    if (error?.message === 'INVALID_PROJECT') {
+      return res.status(400).json({ success: false, error: 'Invalid project' });
+    }
+    if (error?.message === 'PHONE_REQUIRED') {
+      return res.status(400).json({ success: false, error: 'A phone number is required' });
+    }
+    console.error('Create Lead enquiry error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to create enquiry' });
   }
 });
 
@@ -509,7 +722,7 @@ router.post('/:id/convert', authorize('Opportunity', 'create'), async (req: Auth
       // Step 16: Update Lead status to BOOKED — only after Opportunity creation succeeded
       const convertedLead = await tx.lead.update({
         where: { id: lead.id },
-        data: { status: 'BOOKED' },
+        data: { status: 'BOOKED', lostAt: null },
       });
 
       // Step 17: Conversion audit log
@@ -563,119 +776,142 @@ router.post('/:id/convert', authorize('Opportunity', 'create'), async (req: Auth
 
 router.post('/', authorize('Lead', 'create'), async (req: AuthRequest, res: Response) => {
   try {
-    const data = leadCreateSchema.parse(req.body);
-
-    if (await findPhoneConflict(req.tenantId!, data.phone)) {
-      return res.status(409).json({ success: false, error: PHONE_DUPLICATE_ERROR });
+    const {
+      subSource,
+      campaignId,
+      campaign,
+      subCampaignId,
+      subCampaign,
+      secondaryPhone,
+      tertiaryPhone,
+      secondaryEmail,
+      countryCode,
+      secondaryCountryCode,
+      medium,
+      enquiryDescription,
+      channelPartner,
+      enquiryDate,
+      enquiryDetails,
+      siteVisit,
+      ...leadInput
+    } = req.body || {};
+    const metadata = z.object({
+      subSource: z.string().trim().max(120).optional(),
+      campaignId: z.string().trim().optional(),
+      campaign: z.string().trim().max(160).optional(),
+      subCampaignId: z.string().trim().optional(),
+      subCampaign: z.string().trim().max(160).optional(),
+      secondaryPhone: z.string().trim().max(64).optional(),
+      tertiaryPhone: z.string().trim().max(64).optional(),
+      secondaryEmail: z.string().trim().email().optional(),
+      countryCode: z.string().trim().max(8).optional(),
+      secondaryCountryCode: z.string().trim().max(8).optional(),
+      medium: z.string().trim().max(120).optional(),
+      enquiryDescription: z.string().trim().max(5000).optional(),
+      channelPartner: z.string().trim().max(160).optional(),
+      enquiryDate: z.coerce.date().optional(),
+      enquiryDetails: z.record(z.string(), z.unknown()).optional(),
+      siteVisit: z.object({
+        projectId: z.string().optional(),
+        scheduledAt: z.coerce.date(),
+        notes: z.string().trim().max(5000).optional(),
+      }).optional(),
+    }).parse({
+      subSource, campaignId, campaign, subCampaignId, subCampaign,
+      secondaryPhone, tertiaryPhone, secondaryEmail, countryCode,
+      secondaryCountryCode, medium, enquiryDescription, channelPartner,
+      enquiryDate, enquiryDetails, siteVisit,
+    });
+    const incomingSource = typeof leadInput.source === 'string' ? leadInput.source : 'OTHER';
+    const data = leadCreateSchema.parse({
+      ...leadInput,
+      source: sourceEnumValue(incomingSource),
+    });
+    const customFieldError = await validateLeadCustomFields(
+      req.tenantId!,
+      data.customFields || {},
+      true,
+    );
+    if (customFieldError) {
+      return res.status(400).json({ success: false, error: customFieldError });
+    }
+    if (
+      metadata.siteVisit &&
+      !req.user!.isSuperAdmin &&
+      !(await EffectivePermissionService.hasPermission(req.user!.id, 'SITE_VISIT_CREATE'))
+    ) {
+      return res.status(403).json({ success: false, error: 'Insufficient permissions for SiteVisit:create' });
     }
 
-    const leadNumber = await getNextLeadNumber(req.tenantId!);
-
-    const ownerId = req.user!.id;
-
-    const transactionResult = await prisma.$transaction(async (tx) => {
-      const created = await tx.lead.create({
-        data: {
-          tenantId: req.tenantId!,
-          creatorId: req.user!.id,
-          leadNumber,
-          firstName: data.firstName || undefined,
-          lastName: data.lastName,
-          salutation: data.salutation || undefined,
-          title: data.title || undefined,
-          email: data.email || undefined,
-          phone: normalizePhone(data.phone),
-          mobile: data.mobile || undefined,
-          website: data.website || undefined,
-          company: data.company,
-          industry: data.industry || undefined,
-          annualRevenue: data.annualRevenue || undefined,
-          numberOfEmployees: data.numberOfEmployees || undefined,
-          source: data.source,
-          status: 'NEW',
-          rating: data.rating || undefined,
-          description: data.description || undefined,
-          street: data.street || undefined,
-          city: data.city || undefined,
-          stateProvince: data.stateProvince || undefined,
-          country: data.country || undefined,
-          postalCode: data.postalCode || undefined,
-          score: data.score || 0,
-          budget: data.budget || undefined,
-          ownerId,
-          projectId: data.projectId || undefined,
-        },
-        include: {
-          owner: { select: { id: true, firstName: true, lastName: true } },
-          project: { select: { id: true, name: true } },
-        },
-      });
-
-      await createOwnerHistory(
-        {
-          tenantId: req.tenantId!,
-          leadId: created.id,
-          previousOwnerId: null,
-          newOwnerId: ownerId,
-          previousProfile: null,
-          newProfile: req.user!.profileName || null,
-          previousStatus: null,
-          newStatus: 'NEW',
-          handoffReason: 'Lead Created',
-          changedById: req.user!.id,
-        },
-        tx,
-      );
-
-      await tx.auditLog.create({
-        data: {
-          tenantId: req.tenantId!,
-          userId: req.user!.id,
-          leadId: created.id,
-          action: 'CREATE',
-          objectType: 'Lead',
-          objectId: created.id,
-          newValues: {
-            ...data,
-            assignedTo: created.owner ? `${created.owner.firstName} ${created.owner.lastName}` : null,
-          },
-        },
-      });
-
-      const leadForAssignment = {
-        ...created,
-        projectId: created.projectId || data.projectId || null,
-        projectName: created.project?.name || null,
-        status: 'NEW',
-        source: data.source,
-        leadQueueing: true,
-        leadAssigned: false,
-      };
-
-      const rrQueue = isLeadEligibleForAutoAssignment(leadForAssignment, { isNewLead: true })
-        ? await findApplicableRRQueue(req.tenantId!, {
-            projectId: leadForAssignment.projectId,
-            projectName: leadForAssignment.projectName,
-            status: 'NEW',
-            source: String(data.source),
-          }, tx)
-        : null;
-
-      const assignment = rrQueue
-        ? await RoundRobinAssignmentService.assignLeadInTransaction(tx, rrQueue.id, created.id, req.tenantId!)
-        : null;
-      return { created, assignment };
+    const result = await processLeadEnquiry({
+      tenantId: req.tenantId!,
+      userId: req.user!.id,
+      profileName: req.user!.profileName,
+      lead: data,
+      enquiry: {
+        source: incomingSource,
+        subSource: metadata.subSource,
+        campaignId: metadata.campaignId,
+        campaign: metadata.campaign,
+        subCampaignId: metadata.subCampaignId,
+        subCampaign: metadata.subCampaign,
+        secondaryPhone: metadata.secondaryPhone,
+        tertiaryPhone: metadata.tertiaryPhone,
+        secondaryEmail: metadata.secondaryEmail,
+        countryCode: metadata.countryCode,
+        secondaryCountryCode: metadata.secondaryCountryCode,
+        medium: metadata.medium,
+        description: metadata.enquiryDescription,
+        channelPartner: metadata.channelPartner,
+        enquiryDate: metadata.enquiryDate,
+        details: metadata.enquiryDetails,
+      },
+      siteVisit: metadata.siteVisit
+        ? {
+            projectId: metadata.siteVisit.projectId || data.projectId || undefined,
+            scheduledAt: metadata.siteVisit.scheduledAt,
+            notes: metadata.siteVisit.notes,
+          }
+        : undefined,
     });
-    const assignedLead = transactionResult.assignment
-      ? await prisma.lead.findUnique({ where: { id: transactionResult.created.id }, include: { owner: { select: { id: true, firstName: true, lastName: true } }, project: { select: { id: true, name: true } } } })
-      : transactionResult.created;
-    res.status(201).json({ success: true, data: assignedLead || transactionResult.created });
+    if (result.action === 'DUPLICATE_CONFLICT') {
+      return res.status(409).json({
+        success: false,
+        action: result.action,
+        leadIds: result.leadIds,
+        error: 'This phone number matches multiple existing Leads. Ask an administrator to resolve the duplicate records.',
+      });
+    }
+    res.status(result.action === 'NEW_LEAD' ? 201 : 200).json({
+      success: true,
+      action: result.action,
+      leadId: result.leadId,
+      data: result.lead,
+      validationDays: result.validationDays,
+      daysDifference: result.daysDifference,
+      assignment: result.assignment,
+      enquiry: result.enquiry,
+      siteVisit: result.siteVisit,
+      message: result.action === 'NEW_LEAD'
+        ? 'New lead created and assigned'
+        : result.action === 'RE_ENGAGED'
+          ? 'Existing lost lead re-engaged successfully'
+          : result.action === 'OUTSIDE_REENGAGEMENT_WINDOW'
+            ? 'Existing lost lead is outside the re-engagement validation period'
+            : 'Lead already exists',
+    });
   } catch (error: any) {
     if (error.name === 'ZodError') {
       return res.status(400).json({ success: false, error: error.errors[0].message });
     }
     if (isPhoneUniqueViolation(error)) {
-      return res.status(409).json({ success: false, error: PHONE_DUPLICATE_ERROR });
+      return res.status(409).json({ success: false, action: 'DUPLICATE_CONFLICT', error: PHONE_DUPLICATE_ERROR });
+    }
+    if (error?.message === 'INVALID_PROJECT') {
+      return res.status(400).json({ success: false, error: 'Invalid project' });
+    }
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ success: false, error: error.issues[0]?.message || 'Invalid enquiry data' });
     }
     console.error('Create lead error:', error);
     res.status(500).json({ success: false, error: 'Failed to create lead' });
@@ -705,6 +941,24 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
     delete bodyData.reason;
     const data = leadUpdateSchema.parse(bodyData);
 
+    if (data.customFields) {
+      const customFieldError = await validateLeadCustomFields(
+        existingLead.tenantId,
+        data.customFields,
+        false,
+      );
+      if (customFieldError) {
+        return res.status(400).json({ success: false, error: customFieldError });
+      }
+      const storedCustomFields = existingLead.customFields;
+      data.customFields = {
+        ...(storedCustomFields && typeof storedCustomFields === 'object' && !Array.isArray(storedCustomFields)
+          ? storedCustomFields as Record<string, JsonValue>
+          : {}),
+        ...data.customFields,
+      };
+    }
+
     if (data.status && !isValidStatus(data.status)) {
       return res.status(400).json({ success: false, error: `Invalid status: ${data.status}` });
     }
@@ -731,6 +985,9 @@ router.put('/:id', authorize('Lead', 'edit'), async (req: AuthRequest, res: Resp
     }
 
     const { oldValues, newValues, updateData } = computeLeadDiff(existingLead, data);
+    if (updateData.status) {
+      updateData.lostAt = updateData.status === 'LOST' ? new Date() : null;
+    }
 
     if (Object.keys(updateData).length === 0) {
       const unchanged = await prisma.lead.findFirst({
@@ -980,7 +1237,7 @@ router.post('/:id/push-to-svc', authorize('Lead', 'edit'), async (req: AuthReque
     const result = await prisma.$transaction(async (tx) => {
       const updatedLead = await tx.lead.update({
         where: { id: req.params.id },
-        data: { status: 'PROSPECT' },
+        data: { status: 'PROSPECT', lostAt: null },
         include: {
           owner: { select: { id: true, firstName: true, lastName: true } },
         },
@@ -1048,7 +1305,7 @@ router.post('/:id/move-to-recovery', authorize('Lead', 'edit'), async (req: Auth
     const result = await prisma.$transaction(async (tx) => {
       const updatedLead = await tx.lead.update({
         where: { id: req.params.id },
-        data: { status: 'LOST' },
+        data: { status: 'LOST', lostAt: new Date() },
         include: { owner: { select: { id: true, firstName: true, lastName: true } } },
       });
 
@@ -1158,7 +1415,7 @@ router.post('/:id/schedule-site-visit', authorize('Lead', 'edit'), async (req: A
 
       const updatedLead = await tx.lead.update({
         where: { id: req.params.id },
-        data: { status: 'SITE_VISIT_SCHEDULED' },
+        data: { status: 'SITE_VISIT_SCHEDULED', lostAt: null },
         include: {
           owner: { select: { id: true, firstName: true, lastName: true } },
         },
@@ -1236,7 +1493,7 @@ router.put('/:id/status', authorize('Lead', 'edit'), async (req: AuthRequest, re
 
     const updatedLead = await prisma.lead.update({
       where: { id: req.params.id },
-      data: { status },
+      data: { status, lostAt: status === 'LOST' ? new Date() : null },
     });
 
     await prisma.auditLog.create({

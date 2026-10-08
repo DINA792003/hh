@@ -347,21 +347,44 @@ publicRouter.post('/:token/sessions', publicLimiter, async (req, res) => {
       return res.status(409).json({ success: false, error: 'We could not safely match this number to one CRM record. Please contact the team that shared this form.' });
     }
     const sessionToken = randomBytes(32).toString('base64url');
-    const session = await prisma.greSession.create({
-      data: {
-        tenantId: form.tenantId,
-        formId: form.id,
-        sessionTokenHash: tokenHash(sessionToken),
-        phoneCountryCode: parsed.data.countryCode,
-        phone: parsed.data.phone.trim(),
-        normalizedPhone,
-        leadId: matches.length === 1 ? matches[0].id : undefined,
-        leadWasExisting: matches.length > 0,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        currentStep: 2,
-        status: 'IN_PROGRESS',
-        draft: { lead: { secondaryPhone: normalizedAlternatePhone || '' }, siteVisit: { required: false }, company: {} },
-      },
+    const session = await prisma.$transaction(async (tx) => {
+      const existingLead = matches[0]
+        ? await tx.lead.findFirst({
+          where: { id: matches[0].id, tenantId: form.tenantId },
+          select: { ownerId: true },
+        })
+        : null;
+      const createdSession = await tx.greSession.create({
+        data: {
+          tenantId: form.tenantId,
+          formId: form.id,
+          sessionTokenHash: tokenHash(sessionToken),
+          phoneCountryCode: parsed.data.countryCode,
+          phone: parsed.data.phone.trim(),
+          normalizedPhone,
+          leadId: matches.length === 1 ? matches[0].id : undefined,
+          leadWasExisting: matches.length > 0,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          currentStep: 2,
+          status: 'IN_PROGRESS',
+          draft: { lead: { secondaryPhone: normalizedAlternatePhone || '' }, siteVisit: { required: false }, company: {} },
+        },
+      });
+      if (existingLead?.ownerId) {
+        const projectName = matches[0].project?.name;
+        await tx.notification.create({
+          data: {
+            tenantId: form.tenantId,
+            userId: existingLead.ownerId,
+            title: 'GRE registration started',
+            message: `An existing lead started a GRE registration${projectName ? ` for ${projectName}` : ''}.`,
+            type: 'GRE_REGISTRATION',
+            referenceId: matches[0].id,
+            referenceType: 'Lead',
+          },
+        });
+      }
+      return createdSession;
     });
     res.status(201).json({
       success: true,
@@ -493,6 +516,18 @@ publicRouter.post('/:token/submit', async (req, res) => {
         throw Object.assign(new Error('We could not safely match this number to one CRM record. Please contact the team that shared this form.'), { statusCode: 409 });
       }
       const existingLead = matchingLeads[0] ?? null;
+      const existingLeadOwner = existingLead
+        ? await tx.lead.findFirst({
+          where: { id: existingLead.id, tenantId: context.form.tenantId },
+          select: {
+            ownerId: true,
+            source: true,
+            leadSubSource: true,
+            rating: true,
+            owner: { select: { profile: { select: { name: true } } } },
+          },
+        })
+        : null;
       if (!existingLead && !lastName) {
         throw Object.assign(new Error('Last name is required'), { statusCode: 400 });
       }
@@ -792,6 +827,39 @@ publicRouter.post('/:token/submit', async (req, res) => {
             changedById: context.form.createdById,
           }, tx);
         }
+      } else if (draft.siteVisit.required && existingLeadOwner?.owner?.profile?.name === 'SVC') {
+        const salesQueue = await findApplicableRRQueue(context.form.tenantId, {
+          projectId: selectedProjectId,
+          status: getGreLeadStatus(true, existingLead.status),
+          source: existingLeadOwner.source,
+          secondarySource: existingLeadOwner.leadSubSource,
+          priority: existingLeadOwner.rating,
+        }, tx);
+        if (!salesQueue) {
+          throw Object.assign(new Error('No Sales Round Robin queue matches this project.'), { statusCode: 503 });
+        }
+        const salesAssignment = await RoundRobinAssignmentService.assignLeadInTransaction(
+          tx,
+          salesQueue.id,
+          lead.id,
+          context.form.tenantId,
+        );
+        const salesOwner = await tx.user.findFirst({
+          where: { id: salesAssignment.assignedUserId, tenantId: context.form.tenantId },
+          select: { profile: { select: { name: true } } },
+        });
+        await createOwnerHistory({
+          tenantId: context.form.tenantId,
+          leadId: lead.id,
+          previousOwnerId: existingLeadOwner.ownerId,
+          newOwnerId: salesAssignment.assignedUserId,
+          previousProfile: 'SVC',
+          newProfile: salesOwner?.profile?.name || null,
+          previousStatus: existingLead.status,
+          newStatus: getGreLeadStatus(true, existingLead.status),
+          handoffReason: `GRE Site Visit completed for project ${selectedProjectId}`,
+          changedById: context.form.createdById,
+        }, tx);
       }
 
       const seq = await tx.sequence.upsert({
@@ -920,6 +988,9 @@ publicRouter.post('/:token/submit', async (req, res) => {
     }
     if (error instanceof Error && error.message === 'NO_ELIGIBLE_USER') {
       return res.status(503).json({ success: false, error: 'The matching Round Robin queue has no active Sales users. Please contact the CRM team before submitting.' });
+    }
+    if (error instanceof Error && error.message === 'PROJECT_RR_QUEUE_NOT_FOUND') {
+      return res.status(503).json({ success: false, error: 'No Sales Round Robin queue matches this project. Please contact the CRM team before submitting.' });
     }
     if (error instanceof Error && error.message === 'RR_QUEUE_NOT_FOUND') {
       return res.status(503).json({ success: false, error: 'The matching Round Robin queue is no longer available. Please retry or contact the CRM team.' });
